@@ -1,0 +1,26 @@
+version: '3.9'
+
+# This service shares the Postgres + Redis containers already defined
+# in nexus-backend/docker-compose.yml.
+#
+# Run the NestJS docker-compose first, then this one.
+# Both connect to the same `nexus` database on port 5432.
+
+services:
+  agent-core:
+    build: .
+    container_name: nexus_agent_core
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - '8000:8000'
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/nexus
+    depends_on:
+      - postgres
+
+  # Reference the existing Postgres — don't start a new one
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: nexus_postgres   # Same name as NestJS compose
+    external: true                   # Must already be running
