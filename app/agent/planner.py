@@ -44,6 +44,7 @@ def _get_client():
     _client = AsyncOpenAI(api_key=settings.openai_api_key)
     return _client
 
+
 # ---------------------------------------------------------------------------
 # Internal data classes
 # ---------------------------------------------------------------------------
@@ -89,13 +90,11 @@ class PlannerResult:
 async def _load_agent(db: AsyncSession, agent_id: str, org_id: str) -> _AgentRow:
     try:
         result = await db.execute(
-            text(
-                """
+            text("""
                 SELECT id, org_id, system_prompt
                 FROM   agents
                 WHERE  id = :agent_id AND org_id = :org_id AND is_active = true
-            """
-            ),
+            """),
             {"agent_id": agent_id, "org_id": org_id},
         )
         row = result.fetchone()
@@ -106,20 +105,18 @@ async def _load_agent(db: AsyncSession, agent_id: str, org_id: str) -> _AgentRow
         )
     except Exception as e:
         logger.exception(f"Error during loading agent {str(e)}")
-        await db.rollback()    
+        await db.rollback()
 
 
 async def _load_tools(db: AsyncSession, agent_id: str) -> list[_ToolRow]:
     try:
         result = await db.execute(
-            text(
-                """
+            text("""
                 SELECT id, name, description, endpoint_url,
                        http_method, headers, parameters_schema
                 FROM   tools
                 WHERE  agent_id = :agent_id AND is_active = true
-            """
-            ),
+            """),
             {"agent_id": agent_id},
         )
         return [
@@ -138,15 +135,14 @@ async def _load_tools(db: AsyncSession, agent_id: str) -> list[_ToolRow]:
         logger.exception(f"Error during loading tools {str(e)}")
         await db.rollback()
 
+
 def _to_openai_tools(tools: list[_ToolRow]) -> list[dict]:
     return [
         {
             "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.parameters_schema,
-            },
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters_schema,
         }
         for tool in tools
     ]
@@ -197,14 +193,12 @@ async def _log_event(
 ) -> None:
     try:
         await db.execute(
-            text(
-                """
+            text("""
                 INSERT INTO analytics_events
                     (org_id, agent_id, conversation_id, event_type, payload)
                 VALUES
                     (:org_id, :agent_id, :conv_id, :event_type, :payload)
-            """
-            ),
+            """),
             {
                 "org_id": org_id,
                 "agent_id": agent_id,
@@ -289,9 +283,6 @@ async def run(
         role="user",
         content=user_message,
     )
-
-    logger.exception(f"Seq: {seq}")
-
     # ------------------------------------------------------------------
     # 5. Assemble initial working messages list
     # ------------------------------------------------------------------
@@ -482,7 +473,6 @@ async def stream(
     We request it explicitly via stream_options={"include_usage": True}.
     This is an OpenAI-specific option — adjust if switching providers.
     """
-    turn_start = int(time.monotonic() * 1000)
 
     # ------------------------------------------------------------------
     # Setup — identical to run()
@@ -508,7 +498,7 @@ async def stream(
 
     memory = await load_memory(db, conversation_id)
 
-    await save_message(
+    user_message_id = await save_message(
         db,
         conversation_id=conversation_id,
         role="user",
@@ -536,17 +526,17 @@ async def stream(
 
         call_kwargs: dict = {
             "model": MODEL,
-            "messages": working,
+            "input": working,
             "stream": True,
-            "stream_options": {"include_usage": True},
         }
         if openai_tools:
             call_kwargs["tools"] = openai_tools
             call_kwargs["tool_choice"] = "auto"
 
         _client = _get_client()
-        response_stream = await _client.chat.completions.create(**call_kwargs)
-
+        start = int(time.monotonic() * 1000)
+        response_stream = await _client.responses.create(**call_kwargs)
+        
         # Per-iteration accumulators
         accumulated_content = ""
         # Tool calls arrive as indexed chunks — build them up by index.
@@ -554,113 +544,147 @@ async def stream(
         accumulated_tool_calls: dict[int, dict] = {}
         has_tool_calls = False
 
-        async for chunk in response_stream:
+        async for event in response_stream:
 
-            # Usage arrives in the final chunk (stream_options ensures this)
-            if chunk.usage:
-                total_tokens += chunk.usage.total_tokens
+            event_type = event.type
+            # ─────────────────────────────────────────────
+            # TEXT STREAMING
+            # ─────────────────────────────────────────────
+            if event_type == "response.output_text.delta":
 
-            if not chunk.choices:
-                continue
+                delta = event.delta
+                # logger.exception(f"TEXT: {delta}")
+                if not has_tool_calls:
+                    accumulated_content += delta
+                    yield delta
 
-            delta = chunk.choices[0].delta
+            # ─────────────────────────────────────────────
+            # FUNCTION CALL CREATED
+            # ─────────────────────────────────────────────
+            elif event_type == "response.output_item.added":
 
-            # ── Tool call delta ─────────────────────────────────────────
-            # Signals a tool-calling iteration. Stop yielding for this
-            # turn and accumulate the full tool call instead.
-            if delta.tool_calls:
+                item = event.item
+
+                if item.type == "function_call":
+
+                    has_tool_calls = True
+
+                    accumulated_tool_calls[item.id] = {
+                        "id": item.id,
+                        "name": item.name,
+                        "arguments": "",
+                    }
+                # logger.exception(f"FUNCTION CALL CREATED: {str(accumulated_tool_calls)}")
+
+            # ─────────────────────────────────────────────
+            # FUNCTION CALL ARGUMENT STREAMING
+            # ─────────────────────────────────────────────
+            elif event_type == "response.function_call_arguments.delta":
                 has_tool_calls = True
+                item_id = event.item_id
 
-                for tc_delta in delta.tool_calls:
-                    idx = tc_delta.index
+                if item_id not in accumulated_tool_calls:
+                    accumulated_tool_calls[item_id] = {
+                        "id": item_id,
+                        "name": None,
+                        "arguments": "",
+                    }
 
-                    if idx not in accumulated_tool_calls:
-                        accumulated_tool_calls[idx] = {
-                            "id": "",
-                            "type": "function",
-                            "function": {"name": "", "arguments": ""},
-                        }
+                accumulated_tool_calls[item_id]["arguments"] += event.delta
+                # logger.exception(f"FUNCTION CALL ARG STREAM: {str(accumulated_tool_calls)}")
+            # ─────────────────────────────────────────────
+            # FUNCTION CALL FINALIZED
+            # ─────────────────────────────────────────────
+            elif event_type == "response.output_item.done":
 
-                    # Each field trickles in across chunks — concatenate
-                    if tc_delta.id:
-                        accumulated_tool_calls[idx]["id"] += tc_delta.id
+                item = event.item
 
-                    if tc_delta.function:
-                        if tc_delta.function.name:
-                            accumulated_tool_calls[idx]["function"][
-                                "name"
-                            ] += tc_delta.function.name
-                        if tc_delta.function.arguments:
-                            accumulated_tool_calls[idx]["function"][
-                                "arguments"
-                            ] += tc_delta.function.arguments
+                if item.type == "function_call":
 
-            # ── Content delta ───────────────────────────────────────────
-            # Final response — yield each token immediately.
-            # Guard with `not has_tool_calls` for safety, though OpenAI
-            # never sends content and tool_calls in the same response.
-            elif delta.content and not has_tool_calls:
-                accumulated_content += delta.content
-                yield delta.content
+                    has_tool_calls = True
 
-        # ── End of this iteration's stream ─────────────────────────────
+                    accumulated_tool_calls[item.id] = {
+                        "id": item.id,
+                        "name": item.name,
+                        "arguments": item.arguments,
+                    }
+                # logger.exception(f"FUNCTION CALL FINALIZED: {str(accumulated_tool_calls)}")
+            # ─────────────────────────────────────────────
+            # USAGE
+            # ─────────────────────────────────────────────
+
+            elif event_type == "response.completed":
+                if event.response.usage:
+                    total_tokens += event.response.usage.total_tokens
+                end = int(time.monotonic() * 1000)
+
+        # ─────────────────────────────────────────────
+        # END ITERATION
+        # ─────────────────────────────────────────────
+        assistant_msg_id = user_message_id
+        if accumulated_content:
+            assistant_msg_id = await save_message(
+                db,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=accumulated_content,
+                tokens_used=total_tokens,
+                latency_ms=(end - start)
+            )
 
         if not has_tool_calls:
-            # All tokens already yielded above. Record and exit loop.
             final_response = accumulated_content
             break
 
-        # ── Execute tool calls ──────────────────────────────────────────
-        tool_calls_list = [
-            accumulated_tool_calls[i] for i in sorted(accumulated_tool_calls.keys())
-        ]
+        # ─────────────────────────────────────────────
+        # EXECUTE TOOL CALLS
+        # ─────────────────────────────────────────────
 
-        # Persist the intermediate assistant message first so we have
-        # its id to link tool_calls rows against.
-        assistant_msg_id, _ = await save_message(
-            db,
-            conversation_id=conversation_id,
-            role="assistant",
-            content=None,  # tool-calling turn has no text content
-        )
+        tool_calls_list = list(accumulated_tool_calls.values())
 
-        # Add the assistant's tool-calling message to working context
-        working.append(
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": tool_calls_list,
-            }
-        )
-
+        # Add assistant tool calls to context
         for tc in tool_calls_list:
-            tool_name = tc["function"]["name"]
-            tool_config = tools_by_name.get(tool_name)
+            working.append(
+                {
+                    "type": "function_call",
+                    "call_id": tc["id"],
+                    "name": tc["name"],
+                    "arguments": tc["arguments"],
+                }
+            )
 
+        # Execute tools
+        for tc in tool_calls_list:
+            tool_name = tc["name"]
+            tool_config = tools_by_name.get(tool_name)
             if not tool_config:
-                logger.warning("LLM requested unknown tool '%s'", tool_name)
+                logger.warning(
+                    "LLM requested unknown tool '%s'",
+                    tool_name,
+                )
                 working.append(
                     {
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": json.dumps(
-                            {"error": f"Tool '{tool_name}' not found."}
+                        "type": "function_call_output",
+                        "call_id": tc["id"],
+                        "output": json.dumps(
+                            {"error": (f"Tool '{tool_name}' not found.")}
                         ),
                     }
                 )
                 continue
 
             try:
-                arguments = json.loads(tc["function"]["arguments"])
+                arguments = json.loads(tc["arguments"])
+
             except json.JSONDecodeError:
                 arguments = {}
-
             exec_start = int(time.monotonic() * 1000)
+            logger.exception(f"FUNCTION CALL: {str(tool_config)} {arguments}")
             exec_result = await tool_executor.execute(
-                tool=tool_config, arguments=arguments
+                tool=tool_config,
+                arguments=arguments,
             )
             exec_latency = int(time.monotonic() * 1000) - exec_start
-
             await save_tool_call(
                 db,
                 message_id=assistant_msg_id,
@@ -670,62 +694,53 @@ async def stream(
                 status=exec_result.status,
                 latency_ms=exec_latency,
             )
-
             if exec_result.status != "success":
+
                 await _log_event(
                     db,
                     org_id,
                     agent_id,
                     conversation_id,
                     "tool failure",
-                    {"tool": tool_name, "status": exec_result.status},
+                    {
+                        "tool": tool_name,
+                        "status": exec_result.status,
+                    },
                 )
 
             working.append(
                 {
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": json.dumps(exec_result.output),
+                    "type": "function_call_output",
+                    "call_id": tc["id"],
+                    "output": json.dumps(exec_result.output),
                 }
             )
 
-        # ── MAX_ITERATIONS guard ────────────────────────────────────────
-        if iterations == MAX_ITERATIONS:
-            logger.error(
-                "stream() hit MAX_ITERATIONS (%d) for conversation %s",
-                MAX_ITERATIONS,
-                conversation_id,
-            )
-            await _log_event(
-                db,
-                org_id,
-                agent_id,
-                conversation_id,
-                "max iterations reached",
-                {"iterations": MAX_ITERATIONS},
-            )
-            final_response = (
-                "I wasn't able to complete this in the allowed number of steps. "
-                "Try rephrasing or breaking it into smaller questions."
-            )
-            yield final_response
+    # ─────────────────────────────────────────────
+    # MAX ITERATIONS
+    # ─────────────────────────────────────────────
 
-    # ------------------------------------------------------------------
-    # Persist final assistant response + update stats
-    # ------------------------------------------------------------------
-    turn_latency = int(time.monotonic() * 1000) - turn_start
+    if iterations == MAX_ITERATIONS:
 
-    await save_message(
-        db,
-        conversation_id=conversation_id,
-        role="assistant",
-        content=final_response,
-        tokens_used=total_tokens,
-        latency_ms=turn_latency,
-    )
+        logger.error(
+            "stream() hit MAX_ITERATIONS (%d) " "for conversation %s",
+            MAX_ITERATIONS,
+            conversation_id,
+        )
 
-    await update_conversation_stats(
-        db,
-        conversation_id=conversation_id,
-        tokens_delta=total_tokens,
-    )
+        await _log_event(
+            db,
+            org_id,
+            agent_id,
+            conversation_id,
+            "max iterations reached",
+            {"iterations": MAX_ITERATIONS},
+        )
+
+        final_response = (
+            "I wasn't able to complete this in the "
+            "allowed number of steps. Try rephrasing "
+            "or breaking it into smaller questions."
+        )
+
+        yield final_response

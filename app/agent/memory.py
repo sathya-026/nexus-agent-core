@@ -86,31 +86,23 @@ class ConversationMemory:
 
             elif msg.role == "assistant":
                 if msg.tool_calls:
-                    # Part 1 — assistant's intent to call tools
-                    result.append(
+                    # Part 1 — assistant function calls
+                    for tc in msg.tool_calls:
+                        result.append(
+                            {
+                                "type": "function_call",
+                                "call_id": tc.tool_call_id,
+                                "name": tc.tool_name,
+                                "arguments": tc.arguments,
+                            }
+                        )
+                # Part 2 — tool outputs
+                    for tc in msg.tool_calls:
+                        result.append(
                         {
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [
-                                {
-                                    "id": tc.tool_call_id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": tc.tool_name,
-                                        "arguments": tc.arguments,
-                                    },
-                                }
-                                for tc in msg.tool_calls
-                            ],
-                        }
-                    )
-                # Part 2 — synthesised tool results, one per call
-                for tc in msg.tool_calls:
-                    result.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.tool_call_id,
-                            "content": tc.output,
+                            "type": "function_call_output",
+                            "call_id": tc.tool_call_id,
+                            "output": tc.output,
                         }
                     )
             else:
@@ -152,8 +144,7 @@ async def load_memory(
     rows = []
     try:
         result = await db.execute(
-            text(
-                """
+            text("""
                 SELECT
                     m.sequence_number,
                     m.role,
@@ -172,8 +163,7 @@ async def load_memory(
                 LEFT JOIN tool_calls tc ON tc.message_id = m.id
                 LEFT JOIN tools      t  ON t.id = tc.tool_id
                 ORDER BY m.sequence_number ASC, tc.id ASC
-            """
-            ),
+            """),
             {"conv_id": conversation_id, "lim": max_messages},
         )
         rows = result.fetchall()
@@ -227,8 +217,8 @@ async def save_message(
     conversation_id: str,
     role: str,
     content: str,
-    tokens_used: int = 0,
-    latency_ms: int = 0,
+    tokens_used: int = None,
+    latency_ms: int = None,
 ) -> int:
     """
     Persist one message. sequence_number is assigned by the Postgres
@@ -238,15 +228,13 @@ async def save_message(
     """
     try:
         result = await db.execute(
-            text(
-                """
+            text("""
                 INSERT INTO messages
                     (conversation_id, role, content, tokens_used, latency_ms)
                 VALUES
                     (:conv_id, :role, :content, :tokens_used, :latency_ms)
-                RETURNING sequence_number
-            """
-            ),
+                RETURNING *
+            """),
             {
                 "conv_id": conversation_id,
                 "role": role,
@@ -255,9 +243,9 @@ async def save_message(
                 "latency_ms": latency_ms,
             },
         )
-        seq = result.fetchone().sequence_number
+        row = result.fetchone()
         await db.commit()
-        return seq
+        return row.id
     except Exception as e:
         logger.exception(f"Error during inserting message {str(e)}")
         await db.rollback()
@@ -284,15 +272,13 @@ async def save_tool_call(
     """
     try:
         result = await db.execute(
-            text(
-                """
+            text("""
                 INSERT INTO tool_calls
                     (message_id, tool_id, input, output, status, latency_ms)
                 VALUES
                     (:message_id, :tool_id, :input, :output, :status, :latency_ms)
                 RETURNING id
-            """
-            ),
+            """),
             {
                 "message_id": message_id,
                 "tool_id": tool_id,
@@ -308,6 +294,7 @@ async def save_tool_call(
         logger.exception(f"Error during saving tool call {str(e)}")
         await db.rollback()
 
+
 async def update_conversation_stats(
     db: AsyncSession,
     conversation_id: str,
@@ -319,16 +306,14 @@ async def update_conversation_stats(
     """
     try:
         await db.execute(
-            text(
-                """
+            text("""
                 UPDATE conversations
                 SET
                     total_tokens    = total_tokens + :tokens,
                     message_count   = message_count + 1,
                     last_message_at = NOW()
                 WHERE id = :conv_id
-            """
-            ),
+            """),
             {"conv_id": conversation_id, "tokens": tokens_delta},
         )
         await db.commit()
@@ -352,8 +337,7 @@ async def get_or_create_conversation(
     """
     try:
         await db.execute(
-            text(
-                """
+            text("""
                 INSERT INTO conversations
                     (agent_id, session_id, end_user_id, status,
                      total_tokens, message_count, started_at, last_message_at)
@@ -361,9 +345,12 @@ async def get_or_create_conversation(
                     (:agent_id, :session_id, :end_user_id, 'active',
                      0, 0, NOW(), NOW())
                 ON CONFLICT (session_id) DO NOTHING
-            """
-            ),
-            {"agent_id": agent_id, "session_id": session_id, "end_user_id": end_user_id},
+            """),
+            {
+                "agent_id": agent_id,
+                "session_id": session_id,
+                "end_user_id": end_user_id,
+            },
         )
 
         result = await db.execute(
@@ -375,4 +362,4 @@ async def get_or_create_conversation(
         await db.commit()
     except Exception as e:
         logger.exception(f"Error during saving conversation {str(e)}")
-        await db.rollback()    
+        await db.rollback()

@@ -29,6 +29,7 @@ class Setting(BaseSettings):
     nestjs_url: str = "http://localhost:3001"
     internal_secret: str = "temporary"
 
+    tool_header_encryption_key: str
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

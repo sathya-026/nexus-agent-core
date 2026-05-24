@@ -18,9 +18,12 @@ Explicitly NOT responsible for:
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Any
 
 import httpx
+
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import base64
 
@@ -35,50 +38,104 @@ TOOL_TIMEOUT_SECONDS = 10
 # Public result type
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ToolResult:
-    output: dict          # always a dict — normalised from whatever the tool returns
-    status: str           # "success" | "failed" | "timeout"
+    output: dict  # always a dict — normalised from whatever the tool returns
+    status: str  # "success" | "failed" | "timeout"
 
 
 # ---------------------------------------------------------------------------
 # Header decryption
 # ---------------------------------------------------------------------------
 
-def _decrypt_headers(encrypted_headers: dict) -> dict:
+logger = logging.getLogger(__name__)
+
+class DecryptionError(Exception):
+    """Raised when encrypted payload cannot be decrypted."""
+
+
+def _decrypt_headers(stored: dict[str, Any]) -> dict[str, Any]:
     """
-    Decrypt AES-256-GCM encrypted header values.
+    Decrypts data stored in the format:
+    base64(iv):base64(tag):base64(ciphertext)
 
-    Storage format per header value:
-        { "iv": "<base64>", "ciphertext": "<base64>" }
-
-    The NestJS ToolsModule encrypts on write using the same key and format.
-    Plain-text header names are stored as-is; only values are encrypted.
+    Returns the original dictionary if '__encrypted' is not present.
+    Raises DecryptionError for malformed or invalid encrypted payloads.
     """
-    if not encrypted_headers:
-        return {}
+    encryption_key = bytes.fromhex(settings.tool_header_encryption_key)
+    if not isinstance(stored, dict):
+        raise TypeError("stored must be a dictionary")
 
-    key = base64.b64decode(settings.tool_header_encryption_key)  # 32 bytes
-    aesgcm = AESGCM(key)
+    encrypted = stored.get("__encrypted")
 
-    decrypted = {}
-    for header_name, payload in encrypted_headers.items():
+    if not encrypted:
+        return stored
+
+    try:
+        # Validate payload structure
+        parts = encrypted.split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                "Invalid encrypted payload format. "
+                "Expected 'iv:tag:ciphertext'."
+            )
+
+        iv_b64, tag_b64, enc_b64 = parts
+
+        # Decode base64 components
         try:
-            iv         = base64.b64decode(payload["iv"])
-            ciphertext = base64.b64decode(payload["ciphertext"])
-            plaintext  = aesgcm.decrypt(iv, ciphertext, None)
-            decrypted[header_name] = plaintext.decode()
+            iv = base64.b64decode(iv_b64, validate=True)
+            tag = base64.b64decode(tag_b64, validate=True)
+            ciphertext = base64.b64decode(enc_b64, validate=True)
         except Exception as exc:
-            # Log the header name but never the value — it may be an API key.
-            logger.error("Failed to decrypt header '%s': %s", header_name, exc)
-            raise RuntimeError(f"Header decryption failed for '{header_name}'") from exc
+            raise ValueError("Invalid base64 encoding in encrypted payload") from exc
 
-    return decrypted
+        # AES-GCM validation
+        if len(iv) not in (12, 16):
+            raise ValueError("Invalid IV length for AES-GCM")
 
+        if len(tag) != 16:
+            raise ValueError("Invalid authentication tag length")
 
-# ---------------------------------------------------------------------------
+        if len(encryption_key) not in (16, 24, 32):
+            raise ValueError(
+                "Invalid AES key length. "
+                "Must be 16, 24, or 32 bytes."
+            )
+
+        # cryptography AESGCM expects ciphertext + tag
+        encrypted_data = ciphertext + tag
+
+        aesgcm = AESGCM(encryption_key)
+
+        decrypted = aesgcm.decrypt(
+            nonce=iv,
+            data=encrypted_data,
+            associated_data=None
+        )
+
+        try:
+            return json.loads(decrypted.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "Decryption succeeded but payload is not valid UTF-8 JSON"
+            ) from exc
+
+    except InvalidTag as exc:
+        logger.warning("AES-GCM authentication failed")
+        raise DecryptionError(
+            "Failed to decrypt payload: authentication failed"
+        ) from exc
+
+    except Exception as exc:
+        logger.exception("Decryption failed")
+        raise DecryptionError(
+            f"Failed to decrypt payload: {exc}"
+        ) from exc# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
 
 async def execute(tool, arguments: dict) -> ToolResult:
     """
@@ -151,12 +208,14 @@ async def execute(tool, arguments: dict) -> ToolResult:
             else:
                 logger.warning(
                     "Tool '%s' returned HTTP %d: %s",
-                    tool.name, response.status_code, response.text[:200],
+                    tool.name,
+                    response.status_code,
+                    response.text[:200],
                 )
                 return ToolResult(
                     output={
-                        "error":       f"HTTP {response.status_code}",
-                        "detail":      response.text[:500],
+                        "error": f"HTTP {response.status_code}",
+                        "detail": response.text[:500],
                     },
                     status="failed",
                 )
