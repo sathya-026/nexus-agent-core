@@ -27,11 +27,16 @@ import logging
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.redis import get_redis
+from app.core.security.widget_session import SessionDep
 from app.database import get_db
 from app.agent import planner
+
+from app.agent.memory import get_or_create_conversation
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +51,8 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 class ChatRequest(BaseModel):
     agent_id: str = Field(..., description="Agent UUID, validated by NestJS")
     org_id: str = Field(..., description="Org UUID, resolved from API key by NestJS")
-    conversation_id: str = Field(
-        ..., description="Conversation UUID, managed by NestJS"
+    session_id: str = Field(
+        ..., description="Session UUID"
     )
     message: str = Field(..., min_length=1, max_length=4000)
 
@@ -97,9 +102,10 @@ async def _sse_stream(generator):
 
 @router.post("", status_code=status.HTTP_200_OK)
 async def chat(
+    session: SessionDep,
     body: ChatRequest,
-    x_internal_secret: str = Header(..., alias="X-Internal-Secret"),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis)
 ) -> StreamingResponse:
     """
     Run the ReAct planner and stream the response to NestJS,
@@ -112,17 +118,19 @@ async def chat(
         - The conversation exists and belongs to this agent
     So none of those checks happen here.
     """
-    if x_internal_secret != settings.internal_secret:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Unauthorised",
-        )
+    if body.agent_id != session.agent_id:
+        raise HTTPException(status_code=403, detail="Agent mismatch")
+    if body.session_id != session.session_id:
+        raise HTTPException(status_code=403, detail="Session mismatch")
+
+    conversation_id = await get_or_create_conversation(db=db, agent_id=body.agent_id, session_id=body.session_id)
 
     generator = planner.stream(
         db=db,
+        redis=redis,
         agent_id=body.agent_id,
         org_id=body.org_id,
-        conversation_id=body.conversation_id,
+        conversation_id=conversation_id,
         user_message=body.message,
     )
 

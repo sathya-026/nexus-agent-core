@@ -8,11 +8,16 @@ Flow:
   4. NestJS polls document status (pending → indexing → indexed / failed)
 """
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.database import get_db
 from app.rag.indexer import run_indexing_pipeline
+
+from redis.asyncio import Redis
+from app.core.redis import get_redis
 
 router = APIRouter()
 
@@ -27,7 +32,7 @@ class IndexRequest(BaseModel):
 
 def _verify_internal(secret: str):
     """Reject calls that don't come from NestJS."""
-    if secret != settings.nestjs_internal_secret:
+    if secret != settings.internal_secret:
         raise HTTPException(status_code=401, detail="Unauthorized internal call")
 
 @router.post("/index")
@@ -35,13 +40,17 @@ async def index_document(
     req: IndexRequest,
     background_tasks: BackgroundTasks,
     x_internal_secret: str = Header(...),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis)
 ):
     _verify_internal(x_internal_secret)
 
     # Returns 200 immediately — indexing runs in the background.
     # NestJS polls document status to know when it's done.
-    BackgroundTasks.add_task(
+    background_tasks.add_task(
         run_indexing_pipeline,
+        db=db,
+        redis=redis,
         document_id=req.document_id,
         agent_id=req.agent_id,
         org_id=req.org_id,
