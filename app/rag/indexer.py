@@ -15,6 +15,7 @@ Failure handling:
 """
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -24,9 +25,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.database import get_db
 from app.rag.chunker import extract_text, chunk_text, Chunk
 from app.rag.embedder import embed_chunks
+
+from app.agent.semantic_router import invalidate_route_cache
+from redis.asyncio import Redis
 
 logger = logging.getLogger(__name__)
 
@@ -95,13 +98,13 @@ async def _log_analytics(
                 INSERT INTO analytics_events
                     (org_id, agent_id, conversation_id, event_type, payload)
                 VALUES
-                    (:org_id, :agent_id, NULL, :event_type, :payload::jsonb)
+                    (:org_id, :agent_id, NULL, :event_type, :payload)
             """),
             {
                 "org_id": org_id,
                 "agent_id": agent_id,
                 "event_type": event_type,
-                "payload": str(payload).replace("'", '"'),  # crude JSON — use json.dumps in prod
+                "payload": json.dumps(payload),
             },
         )
         await db.commit()
@@ -150,14 +153,14 @@ async def _insert_chunks(
 
     for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
         # Convert Python list[float] → pgvector literal string: "[0.1,0.2,...]"
-        vector_literal = "[" + ",".join(str(x) for x in embedding) + "]"
+        # vector_literal = "[" + ",".join(str(x) for x in embedding) + "]"
         rows.append(
-            f"(:doc_id_{i}, :agent_id_{i}, :content_{i}, :vector_{i}::vector, :chunk_index_{i})"
+            f"(:doc_id_{i}, :agent_id_{i}, :content_{i}, CAST(:vector_{i} AS vector), :chunk_index_{i})"
         )
         params[f"doc_id_{i}"] = document_id
         params[f"agent_id_{i}"] = agent_id
         params[f"content_{i}"] = chunk.content
-        params[f"vector_{i}"] = vector_literal
+        params[f"vector_{i}"] = [float(x) for x in embedding]
         params[f"chunk_index_{i}"] = chunk.chunk_index
 
     sql = f"""
@@ -176,6 +179,8 @@ async def _insert_chunks(
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
 async def run_indexing_pipeline(
+    db: AsyncSession,
+    redis: Redis,
     document_id: str,
     agent_id: str,
     org_id: str,
@@ -192,68 +197,72 @@ async def run_indexing_pipeline(
         s3_key:      S3 object key to download the file from.
         file_type:   MIME type (e.g. "application/pdf").
     """
-    async with get_db() as db:
+    
+    try:
+        # ── Stage 1: Mark as indexing ────────────────────────────────────
+        logger.info("Starting indexing: document_id=%s", document_id)
+        await _set_status(db, document_id, "indexing")
+
+        # ── Stage 2: Download from S3 ────────────────────────────────────
+        logger.info("Downloading from S3: key=%s", s3_key)
         try:
-            # ── Stage 1: Mark as indexing ────────────────────────────────────
-            logger.info("Starting indexing: document_id=%s", document_id)
-            await _set_status(db, document_id, "indexing")
+            file_bytes = await _download_from_s3(s3_key)
+        except (BotoCoreError, ClientError) as e:
+            raise RuntimeError(f"S3 download failed: {e}") from e
 
-            # ── Stage 2: Download from S3 ────────────────────────────────────
-            logger.info("Downloading from S3: key=%s", s3_key)
-            try:
-                file_bytes = await _download_from_s3(s3_key)
-            except (BotoCoreError, ClientError) as e:
-                raise RuntimeError(f"S3 download failed: {e}") from e
+        # ── Stage 3: Extract text ────────────────────────────────────────
+        logger.info("Extracting text from %s", file_type)
+        try:
+            raw_text = extract_text(file_bytes, file_type)
+        except ValueError as e:
+            raise RuntimeError(f"Text extraction failed: {e}") from e
 
-            # ── Stage 3: Extract text ────────────────────────────────────────
-            logger.info("Extracting text from %s", file_type)
-            try:
-                raw_text = extract_text(file_bytes, file_type)
-            except ValueError as e:
-                raise RuntimeError(f"Text extraction failed: {e}") from e
+        if not raw_text.strip():
+            raise RuntimeError("Document produced no extractable text")
 
-            if not raw_text.strip():
-                raise RuntimeError("Document produced no extractable text")
+        logger.info("Extracted %d characters", len(raw_text))
 
-            logger.info("Extracted %d characters", len(raw_text))
+        # ── Stage 4: Chunk ───────────────────────────────────────────────
+        chunks = chunk_text(raw_text)
+        logger.info("Produced %d chunks", len(chunks))
 
-            # ── Stage 4: Chunk ───────────────────────────────────────────────
-            chunks = chunk_text(raw_text)
-            logger.info("Produced %d chunks", len(chunks))
+        if not chunks:
+            raise RuntimeError("Chunker produced no chunks from document text")
 
-            if not chunks:
-                raise RuntimeError("Chunker produced no chunks from document text")
+        # ── Stage 5: Embed ───────────────────────────────────────────────
+        logger.info("Embedding %d chunks...", len(chunks))
+        embeddings = await embed_chunks(chunks)
 
-            # ── Stage 5: Embed ───────────────────────────────────────────────
-            logger.info("Embedding %d chunks...", len(chunks))
-            embeddings = await embed_chunks(chunks)
+        if len(embeddings) != len(chunks):
+            raise RuntimeError(
+                f"Embedding count mismatch: {len(embeddings)} vectors for {len(chunks)} chunks"
+            )
 
-            if len(embeddings) != len(chunks):
-                raise RuntimeError(
-                    f"Embedding count mismatch: {len(embeddings)} vectors for {len(chunks)} chunks"
-                )
+        # ── Stage 6: Insert into Postgres ────────────────────────────────
+        logger.info("Inserting chunks into document_chunks...")
+        await _insert_chunks(db, document_id, agent_id, chunks, embeddings)
 
-            # ── Stage 6: Insert into Postgres ────────────────────────────────
-            logger.info("Inserting chunks into document_chunks...")
-            await _insert_chunks(db, document_id, agent_id, chunks, embeddings)
+        # ── Stage 7: Mark as indexed ─────────────────────────────────────
+        await _set_status(db, document_id, "indexed", chunk_count=len(chunks))
+        logger.info("Indexing complete: %d chunks stored", len(chunks))
 
-            # ── Stage 7: Mark as indexed ─────────────────────────────────────
-            await _set_status(db, document_id, "indexed", chunk_count=len(chunks))
-            logger.info("Indexing complete: %d chunks stored", len(chunks))
+        # ── Stage 8: Invalidate semantic router cache ───────────────────
+        # So the new document is considered in routing decisions immediately.
+        invalidate_route_cache(redis, agent_id)
 
-            await _log_analytics(db, org_id, agent_id, document_id, "document indexed", {
-                "chunk_count": len(chunks),
+        await _log_analytics(db, org_id, agent_id, document_id, "document indexed", {
+            "chunk_count": len(chunks),
+            "file_type": file_type,
+        })
+
+    except Exception as e:
+        # Mark document as failed so the dashboard shows an error state
+        logger.error("Indexing failed for document %s: %s", document_id, e, exc_info=True)
+        try:
+            await _set_status(db, document_id, "failed")
+            await _log_analytics(db, org_id, agent_id, document_id, "indexing failed", {
+                "error": str(e),
                 "file_type": file_type,
             })
-
-        except Exception as e:
-            # Mark document as failed so the dashboard shows an error state
-            logger.error("Indexing failed for document %s: %s", document_id, e, exc_info=True)
-            try:
-                await _set_status(db, document_id, "failed")
-                await _log_analytics(db, org_id, agent_id, document_id, "indexing failed", {
-                    "error": str(e),
-                    "file_type": file_type,
-                })
-            except Exception as inner:
-                logger.error("Failed to update error status: %s", inner)
+        except Exception as inner:
+            logger.error("Failed to update error status: %s", inner)

@@ -85,6 +85,9 @@ class ConversationMemory:
                 result.append({"role": "user", "content": msg.content})
 
             elif msg.role == "assistant":
+                if msg.content:
+                    # Include the assistant's text content as a separate message
+                    result.append({"role": "assistant", "content": msg.content})
                 if msg.tool_calls:
                     # Part 1 — assistant function calls
                     for tc in msg.tool_calls:
@@ -104,11 +107,37 @@ class ConversationMemory:
                             "call_id": tc.tool_call_id,
                             "output": tc.output,
                         }
-                    )
+                    )                
             else:
                 result.append({"role": "assistant", "content": msg.content})
 
         return result
+
+    def to_context_string(
+        self,
+        max_messages: int = 8,
+        max_chars_per_message: int = 500,
+    ) -> str:
+        """
+        Compact text-only history for routing and retrieval query expansion.
+        """
+        lines: list[str] = []
+
+        for msg in self.messages[-max_messages:]:
+            if msg.role not in {"user", "assistant"} or not msg.content:
+                continue
+
+            content = " ".join(str(msg.content).split())
+            if not content:
+                continue
+
+            if len(content) > max_chars_per_message:
+                content = content[:max_chars_per_message].rstrip() + "..."
+
+            label = "User" if msg.role == "user" else "Assistant"
+            lines.append(f"{label}: {content}")
+
+        return "\n".join(lines)
 
     @property
     def is_empty(self) -> bool:
@@ -357,9 +386,9 @@ async def get_or_create_conversation(
             text("SELECT id FROM conversations WHERE session_id = :sid"),
             {"sid": session_id},
         )
+        await db.commit()
         return str(result.fetchone().id)
 
-        await db.commit()
     except Exception as e:
         logger.exception(f"Error during saving conversation {str(e)}")
         await db.rollback()

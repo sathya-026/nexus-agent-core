@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Optional, AsyncGenerator
 
 from openai import AsyncOpenAI
+from redis.asyncio.client import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +34,7 @@ from app.agent.memory import (
     update_conversation_stats,
 )
 from app.agent import tool_executor
+from app.agent.semantic_router import (route as semantic_router, Route)
 
 logger = logging.getLogger(__name__)
 
@@ -454,6 +456,7 @@ async def run(
 # stream() alongside the existing run()
 async def stream(
     db: AsyncSession,
+    redis: Redis,
     agent_id: str,
     org_id: str,
     conversation_id: str,
@@ -477,26 +480,60 @@ async def stream(
     # ------------------------------------------------------------------
     # Setup — identical to run()
     # ------------------------------------------------------------------
+    memory = await load_memory(db, conversation_id)
+    routing_context = memory.to_context_string()
+
+    route_result = await semantic_router(
+        db=db,
+        redis=redis,
+        agent_id=agent_id,
+        user_message=user_message,
+        conversation_context=routing_context,
+    )
+    route = route_result.route
+    meta_context = route_result.meta_context
+    retrieval_query = route_result.query_text or user_message
+
+    await _log_event(
+        db,
+        org_id,
+        agent_id,
+        conversation_id,
+        event_type="semantic routing",
+        payload={
+            "route": route.value,
+            "meta_context": meta_context,
+            "matched_tools": route_result.matched_tools,
+            "contextualized_query": retrieval_query != user_message,
+        },
+    )
+
+    use_tools = route == Route.BOTH or route == Route.TOOL
+    use_rag = route == Route.BOTH or route == Route.RAG
+  
     agent = await _load_agent(db, agent_id, org_id)
-    tools = await _load_tools(db, agent_id)
+    tools = await _load_tools(db, agent_id) if use_tools else []
     tools_by_name = {t.name: t for t in tools}
     openai_tools = _to_openai_tools(tools) if tools else []
 
-    retrieved = await retrieve(db, agent_id=agent_id, query=user_message)
+    retrieved = (
+        await retrieve(db, agent_id=agent_id, query=retrieval_query)
+        if use_rag
+        else []
+    )
+    
     rag_hit = bool(retrieved)
     rag_context = format_context_for_prompt(retrieved) if rag_hit else ""
 
-    if not rag_hit:
+    if use_rag and not rag_hit:
         await _log_event(
             db,
             org_id,
             agent_id,
             conversation_id,
             "RAG miss",
-            {"query": user_message},
+            {"query": retrieval_query},
         )
-
-    memory = await load_memory(db, conversation_id)
 
     user_message_id = await save_message(
         db,
@@ -507,10 +544,18 @@ async def stream(
 
     system_prompt = _build_system_prompt(agent, rag_context, has_tools=bool(tools))
 
+    current_user_message = user_message
+    if route == Route.META:
+        current_user_message = (
+            user_message
+            + "\n\nAvailable agent context:\n"
+            + json.dumps(meta_context or {})
+        )
+
     working: list[dict] = [
         {"role": "system", "content": system_prompt},
         *memory.to_openai_messages(),
-        {"role": "user", "content": user_message},
+        {"role": "user", "content": current_user_message},
     ]
 
     # ------------------------------------------------------------------
