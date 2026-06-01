@@ -20,7 +20,12 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from sqlalchemy.engine.url import URL
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    create_async_engine,
+    async_sessionmaker,
+)
 from sqlalchemy import text
 from pgvector.asyncpg import register_vector
 
@@ -35,6 +40,7 @@ logger = logging.getLogger(__name__)
 # max_overflow=20: up to 20 extra connections when the pool is full
 # pool_pre_ping=True: test connections before using them (handles DB restarts)
 
+
 def new_async_engine(uri: URL) -> AsyncEngine:
     return create_async_engine(
         uri,
@@ -44,6 +50,7 @@ def new_async_engine(uri: URL) -> AsyncEngine:
         pool_timeout=30.0,
         pool_recycle=600,
     )
+
 
 _ASYNC_ENGINE = new_async_engine(settings.database_url)
 _ASYNC_SESSIONMAKER = async_sessionmaker(_ASYNC_ENGINE, expire_on_commit=False)
@@ -61,25 +68,21 @@ def register_vector_event(dbapi_connection, connection_record):
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    session = _ASYNC_SESSIONMAKER()    
-    try:
-        yield session
-        await session.commit()
-    except Exception as e:
-        await session.rollback()
-        raise
-    finally:
-        await session.close()
-
+    async with _ASYNC_SESSIONMAKER() as session:
+        try:
+            yield session
+        except Exception as e:
+            await session.rollback()
+            raise
 
 # ── Health check ──────────────────────────────────────────────────────────────
-
-
 async def check_db_connection() -> bool:
-    try:
-        session = _ASYNC_SESSIONMAKER() 
-        await session.execute(text("SELECT 1"))
-        return True
-    except Exception as e:
-        print(f"Error: {e}")
-        return False
+    is_healthy = False
+    async with _ASYNC_SESSIONMAKER() as session:
+        try:        
+            await session.execute(text("SELECT 1"))
+            is_healthy = True
+        except Exception as e:
+            print(f"Error: {e}")
+            is_healthy = False
+    return is_healthy

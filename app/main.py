@@ -8,12 +8,18 @@ from app.config import settings
 from app.database import check_db_connection, _ASYNC_ENGINE
 from app.routers import indexing, chat
 
+from app.agent.semantic_router import warmup_model
+from app.core.redis import create_redis_client
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 #
 # Code before `yield` runs at startup, code after runs at shutdown.
 # This is where you'd warm up connection pools, load models into memory, etc.
 
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 @asynccontextmanager
@@ -27,9 +33,17 @@ async def lifespan(app: FastAPI):
     print(
         f"🤖 Using models: embed={settings.embedding_model}, chat={settings.chat_model}"
     )
+    print(logging.getLevelName(logger.getEffectiveLevel()))
+    # Redis
+    app.state.redis = create_redis_client(settings.redis_url)
+    logger.info("Redis client created.")
+
+    # MiniLM — warm up at startup, not on first request
+    warmup_model()
     yield
     # Shutdown
     await _ASYNC_ENGINE.dispose()
+    await app.state.redis.aclose()
     logger.info("disposed database engine and closed connections...")
     print("👋 Nexus agent-core shutting down")
 
@@ -50,7 +64,7 @@ app = FastAPI(
 # CORS — only NestJS and the widget need to reach this service
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.nestjs_url, "http://localhost:3000"],
+    allow_origins=[settings.nestjs_url, "http://localhost:5173"],
     allow_methods=["POST", "GET"],
     allow_headers=["Authorization", "Content-Type"],
 )
