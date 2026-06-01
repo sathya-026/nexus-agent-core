@@ -9,6 +9,9 @@ class Setting(BaseSettings):
     # Database
     database_url: str
 
+    #redis
+    redis_url: str = "redis://localhost:6379"
+
     # OpenAI
     openai_api_key: str
     embedding_model: str = "text-embedding-3-small"
@@ -30,6 +33,7 @@ class Setting(BaseSettings):
     internal_secret: str = "temporary"
 
     tool_header_encryption_key: str
+    widget_jwt_secret: str
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

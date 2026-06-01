@@ -6,9 +6,24 @@ asyncpg==0.29.0
 sqlalchemy[asyncio]==2.0.30
 pgvector==0.2.5
 
+# Redis
+redis==7.4.0
+
+# Encrypt
+cryptography==48.0.0
+
+# Auth
+jwt==1.4.0
+pyjwt-2.13.0
+
 # AI
-openai==1.30.0
+openai==2.38.0
 tiktoken==0.7.0        # Token counting (same tokenizer OpenAI uses)
+
+# ollama==0.6.2
+
+# NLP
+# spacy==3.8.14
 
 # Document parsing
 pypdf==4.2.0           # PDF text extraction
