@@ -8,7 +8,7 @@ from app.config import settings
 from app.database import check_db_connection, _ASYNC_ENGINE
 from app.routers import indexing, chat
 
-from app.agent.semantic_router import warmup_model
+from app.agent.query_router import warmup_model
 from app.core.redis import create_redis_client
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────

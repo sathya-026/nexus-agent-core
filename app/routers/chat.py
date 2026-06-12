@@ -30,13 +30,13 @@ from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.core.redis import get_redis
 from app.core.security.widget_session import SessionDep
 from app.database import get_db
 from app.agent import planner
 
-from app.agent.memory import get_or_create_conversation
+from app.db.conversations import get_or_create_conversation
+
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,6 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 class ChatRequest(BaseModel):
     agent_id: str = Field(..., description="Agent UUID, validated by NestJS")
-    org_id: str = Field(..., description="Org UUID, resolved from API key by NestJS")
     session_id: str = Field(
         ..., description="Session UUID"
     )
@@ -108,20 +107,12 @@ async def chat(
     redis: Redis = Depends(get_redis)
 ) -> StreamingResponse:
     """
-    Run the ReAct planner and stream the response to NestJS,
-    which proxies it on to the widget.
-
-    NestJS guarantees:
-        - The API key was valid
-        - The agent belongs to the org
-        - The origin domain was permitted
-        - The conversation exists and belongs to this agent
-    So none of those checks happen here.
+    Run the ReAct planner and stream the response to Widget
     """
     if body.agent_id != session.agent_id:
         raise HTTPException(status_code=403, detail="Agent mismatch")
     if body.session_id != session.session_id:
-        raise HTTPException(status_code=403, detail="Session mismatch")
+        raise HTTPException(status_code=403, detail="Session mismatch")    
 
     conversation_id = await get_or_create_conversation(db=db, agent_id=body.agent_id, session_id=body.session_id)
 
@@ -129,7 +120,7 @@ async def chat(
         db=db,
         redis=redis,
         agent_id=body.agent_id,
-        org_id=body.org_id,
+        org_id=session.org_id,
         conversation_id=conversation_id,
         user_message=body.message,
     )

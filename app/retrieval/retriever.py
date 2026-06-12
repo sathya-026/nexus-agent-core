@@ -23,14 +23,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.rag.embedder import embed_query
-from app.common.decorators import catch_and_log_exceptions
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TOP_K     = 5
-DEFAULT_THRESHOLD = 0.3
+DEFAULT_THRESHOLD = 0.2
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +78,18 @@ async def retrieve(
     # pgvector literal format: "[0.12, -0.34, ...]"
     # Consistent with the ::vector cast used in the indexer bulk insert.
     embedding_str = "[" + ",".join(str(float(v)) for v in query_vector) + "]"
+    
+    # Debug: Check if any chunks exist for this agent
+    count_result = await db.execute(
+        text("SELECT COUNT(*) as cnt FROM document_chunks WHERE agent_id = :agent_id"),
+        {"agent_id": agent_id}
+    )
+    total_chunks = count_result.scalar() or 0
+    logger.debug(
+        "Total chunks indexed for agent %s: %d",
+        agent_id, total_chunks
+    )
+    
     rows = []
     try:
         result = await db.execute(
@@ -124,6 +135,25 @@ async def retrieve(
         "Retrieved %d/%d chunks for agent %s (threshold=%.2f, top_k=%d)",
         len(chunks), top_k, agent_id, threshold, top_k,
     )
+    
+    # Debug: Log top 5 candidates with their scores (before threshold filter)
+    if not chunks:
+        top_candidates = await db.execute(
+            text(f"""
+                SELECT content, 1 - (embedding <=> '{embedding_str}'::vector) AS similarity
+                FROM document_chunks
+                WHERE agent_id = :agent_id
+                ORDER BY embedding <=> '{embedding_str}'::vector ASC
+                LIMIT 5
+            """),
+            {"agent_id": agent_id},
+        )
+        top_rows = top_candidates.fetchall()
+        for i, row in enumerate(top_rows):
+            logger.debug(
+                "  [Candidate %d] similarity=%.4f | content_preview=%s...",
+                i+1, float(row.similarity), str(row.content)[:80]
+            )
 
     return chunks
 

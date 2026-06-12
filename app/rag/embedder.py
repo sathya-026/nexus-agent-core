@@ -14,8 +14,7 @@ Key decisions:
     matters more than cost.
 """
 
-import asyncio
-from openai import AsyncOpenAI
+from app.ai.factory import get_provider
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -24,11 +23,9 @@ from tenacity import (
 )
 from openai import RateLimitError, APITimeoutError
 
+from app.common.constants import AIProviderType
 from app.config import settings
 from app.rag.chunker import Chunk
-
-
-_client = AsyncOpenAI(api_key=settings.openai_api_key)
 
 BATCH_SIZE = 100  # Chunks per API call — safely under the 2048 limit
 
@@ -47,7 +44,8 @@ async def _embed_batch(texts: list[str]) -> list[list[float]]:
       - Only retries on RateLimitError and APITimeoutError — not on bad input.
       - Raises after 4 failed attempts so the indexer can mark the doc as failed.
     """
-    response = await _client.embeddings.create(
+    provider = get_provider(AIProviderType.OPENAI, settings.chat_model)
+    response = await provider._client.embeddings.create(
         model=settings.embedding_model,
         input=texts,
         # encoding_format="float" is the default — explicit for clarity.
