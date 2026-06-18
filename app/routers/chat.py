@@ -27,6 +27,7 @@ import logging
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from pypdf.generic import ContentStream
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,7 +62,7 @@ class ChatRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def _sse_stream(generator):
+async def _sse_stream(generator: ContentStream, conversation_id: str):
     """
     Wrap the planner's token generator in SSE format.
 
@@ -77,6 +78,9 @@ async def _sse_stream(generator):
         at this point — the error event signals it to stop expecting more.
     """
     try:
+        start_event = {"type": "start", "conversationId": conversation_id}
+        yield f"data: {json.dumps(start_event)}\n\n"
+
         async for token in generator:
             payload = json.dumps({"type": "token", "content": token})
             yield f"data: {payload}\n\n"
@@ -126,7 +130,7 @@ async def chat(
     )
 
     return StreamingResponse(
-        _sse_stream(generator),
+        _sse_stream(generator, conversation_id),
         media_type="text/event-stream",
         headers={
             # Prevent any intermediate proxy from buffering the stream.
