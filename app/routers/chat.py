@@ -51,6 +51,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 class ChatRequest(BaseModel):
     agent_id: str = Field(..., description="Agent UUID, validated by NestJS")
+    access_type: str = Field(..., description="Determines if agent is public or private")
     session_id: str = Field(
         ..., description="Session UUID"
     )
@@ -113,6 +114,9 @@ async def chat(
     """
     Run the ReAct planner and stream the response to Widget
     """
+
+    if body.access_type == 'private' and session.email == None:
+        raise HTTPException(status_code=403, detail="Forbidden")
     if body.agent_id != session.agent_id:
         raise HTTPException(status_code=403, detail="Agent mismatch")
     if body.session_id != session.session_id:

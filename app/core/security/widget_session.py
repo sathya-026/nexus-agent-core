@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Annotated
+from typing import Annotated, Optional
 
 import logging
 import jwt
@@ -20,6 +20,7 @@ class WidgetSession(BaseModel):
     agent_id: str   # → agents.id
     org_id: str     # → organizations.id
     session_id: str # → conversations.session_id
+    email: Optional[str]
 
 
 def _decode(token: str) -> WidgetSession:
@@ -30,6 +31,7 @@ def _decode(token: str) -> WidgetSession:
             algorithms=[ALGORITHM],
             options={"require": ["exp", "sub", "iat"]},
         )
+        
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Session token expired")
     except jwt.PyJWTError:
@@ -46,8 +48,8 @@ def _decode(token: str) -> WidgetSession:
         agent_id=payload["agentId"],
         org_id=payload["orgId"],
         session_id=payload["sessionId"],
+        email=payload.get("email")
     )
-
 
 def get_session(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(_http_bearer)],
