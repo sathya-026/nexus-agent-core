@@ -8,7 +8,7 @@ from app.config import settings
 from app.database import check_db_connection, _ASYNC_ENGINE
 from app.routers import indexing, chat
 
-from app.agent.query_router import warmup_model
+# from app.agent.query_router import warmup_model
 from app.core.redis import create_redis_client
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
     logger.info("Redis client created.")
 
     # MiniLM — warm up at startup, not on first request
-    warmup_model()
+    # warmup_model()
     yield
     # Shutdown
     await _ASYNC_ENGINE.dispose()
