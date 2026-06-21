@@ -10,7 +10,7 @@ class Setting(BaseSettings):
     database_url: str
 
     #redis
-    redis_url: str = "redis://localhost:6379"
+    redis_url: str
 
     # OpenAI
     openai_api_key: str
