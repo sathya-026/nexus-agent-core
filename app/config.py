@@ -6,6 +6,8 @@ class Setting(BaseSettings):
     port: int = 8000
     environment: str = "development"
 
+    frontend_url: str = "http://localhost:5173"
+
     # Database
     database_url: str
 
