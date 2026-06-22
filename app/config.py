@@ -19,6 +19,9 @@ class Setting(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     chat_model: str = "gpt-4o-mini"
 
+    # Gemini
+    gemini_api_key: str
+
     # AWS S3
     aws_region: str = "us-east-1"
     aws_access_key_id: str = ""

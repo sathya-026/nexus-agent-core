@@ -42,8 +42,12 @@ def get_provider(provider: str, model: str) -> AIProvider:
             from app.ai.providers.openai import OpenAIProvider
             return OpenAIProvider(model=model)
 
+        case AIProviderType.GEMINI:
+            from app.ai.providers.gemini import GeminiProvider
+            return GeminiProvider(model=model)
+
         case _:
             raise ValueError(
                 f"Unknown AI provider '{provider}'. "
-                f"Supported providers: {AIProviderType.OPENAI}"
+                f"Supported providers: openai, gemini"
             )

@@ -48,7 +48,7 @@ class OpenAIProvider(AIProvider):
 
     def format_messages(
         self,
-        past_messages: list[MemoryMessage],
+        memory: list[MemoryMessage],
         system_prompt: str,
         rag_context: str,
     ) -> list[dict[str, Any]]:
@@ -70,7 +70,7 @@ class OpenAIProvider(AIProvider):
             }
         )
 
-        for mem in past_messages:
+        for mem in memory:
             messages.extend(self._memory_message_to_openai(mem))
 
         return messages
@@ -208,17 +208,17 @@ class OpenAIProvider(AIProvider):
 
     def _build_system_prompt(self, system_prompt: str, rag_context: str) -> str:
         """
-        Compose the full system message from three sections:
+        Compose the full system message from four sections:
           1. Agent persona / instructions
           2. RAG knowledge base context (omitted on RAG miss)
-          3. Behavioural guardrails
+          3. Formatting instructions
+          4. Behavioural guardrails
         """
         sections: list[str] = [system_prompt.strip()]
         if rag_context:
             sections.append(f"## Knowledge Base Context\n{rag_context}")
         sections.append(self.FORMATTING_INSTRUCTIONS)
         sections.append(self._guardrails())
-
 
         return "\n\n".join(sections)
 

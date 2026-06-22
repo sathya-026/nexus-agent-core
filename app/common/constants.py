@@ -12,4 +12,5 @@ class AnalyticEvent(str, Enum):
 
 class AIProviderType(str, Enum):
     OPENAI = "openai"
+    GEMINI = "gemini"
     AZURE_OPENAI = "azure_openai"

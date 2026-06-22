@@ -33,15 +33,26 @@ class ToolCallRecord:
     """
     tool_call_id: str        # "call_{tool_calls.id}"
     tool_name: str
-    arguments: str           # JSON string — e.g. '{"city": "London"}'
-    output: str              # JSON string — tool_calls.output serialised
+    arguments: str            # JSON string — e.g. '{"city": "London"}'
+    output: str               # JSON string — tool_calls.output serialised
 
 
 @dataclass
 class MemoryMessage:
+    """
+    One turn in conversation history, loaded from Postgres by memory.py.
+
+    role is one of: "user" | "assistant"
+    There are no "tool" role rows here — tool results are embedded inside
+    tool_calls on the assistant message that triggered them, exactly as they
+    are stored in the DB.
+
+    content is an empty string for assistant messages that only made tool calls
+    (their content column is NULL in the messages table — normalised to "" here).
+    """
     sequence_number: int
-    role: str                # "user" | "assistant"
-    content: str             # empty string for tool-only assistant turns (not None)
+    role: str                             # "user" | "assistant"
+    content: str                          # "" for tool-only assistant turns
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
 
 # ---------------------------------------------------------------------------

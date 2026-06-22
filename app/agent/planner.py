@@ -211,7 +211,7 @@ async def _execute(
         effective_user_message = user_message + meta_text
 
     messages = provider.format_messages(
-        past_messages=memory.messages,
+        memory=memory.messages,
         system_prompt=agent.system_prompt,
         rag_context=rag_context,
     )
