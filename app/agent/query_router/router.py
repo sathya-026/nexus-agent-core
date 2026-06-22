@@ -42,7 +42,7 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.query_router.types import Route, RouteResult
-from app.agent.query_router.embedder import embed, cosine_similarities, embed_async, blend_embeddings
+from app.agent.query_router.embedder import cosine_similarities, embed_async, embed_query_async, blend_embeddings
 from app.agent.query_router.classifier import (
     INTENT_SIMILARITY_THRESHOLD,
     build_routing_query,
@@ -61,9 +61,9 @@ from app.agent.query_router.fallback import llm_route_fallback
 
 logger = logging.getLogger(__name__)
 
-TOOL_SIMILARITY_THRESHOLD         = 0.55
-DOC_SIMILARITY_THRESHOLD          = 0.50
-DOC_INFORMATION_REQUEST_THRESHOLD = 0.35
+TOOL_SIMILARITY_THRESHOLD         = 0.75  # Was 0.55
+DOC_SIMILARITY_THRESHOLD          = 0.70  # Was 0.50
+DOC_INFORMATION_REQUEST_THRESHOLD = 0.55  # Was 0.35
 
 
 async def route(
@@ -135,11 +135,11 @@ async def route(
 
     query_text  = build_routing_query(raw_query, conversation_context)
 
-    raw_embedding   = (await embed_async([raw_query]))[0]
+    raw_embedding   = (await embed_query_async(raw_query))
     query_embedding = (
         raw_embedding
         if query_text == raw_query
-        else (await embed_async([query_text]))[0]
+        else (await embed_query_async(raw_query))
     )
     
     # ── Load conversation intent and blend with current query ────────────────────
@@ -171,9 +171,11 @@ async def route(
     # "what can you do?" should match on their own phrasing.
     intent_data    = await get_or_build_intent_cache(redis)
     meta_embeddings = intent_data["meta_embeddings"]
-
+    doc_scores     = cosine_similarities(doc_embeddings, blended_query_embedding)
+    meta_scores = cosine_similarities(meta_embeddings + tool_embeddings + doc_embeddings, raw_embedding)
+    
     if meta_embeddings:
-        meta_scores = cosine_similarities(meta_embeddings + tool_embeddings + doc_embeddings, raw_embedding)
+        # meta_scores = cosine_similarities(meta_embeddings + tool_embeddings + doc_embeddings, raw_embedding)
         if float(meta_scores.max()) >= INTENT_SIMILARITY_THRESHOLD:
             logger.debug("Meta intent matched for agent %s.", agent_id)
             return RouteResult(
@@ -196,7 +198,7 @@ async def route(
     # ── 6. Score against document embeddings ──────────────────────────────────
     use_rag = False
     if doc_embeddings:
-        doc_scores     = cosine_similarities(doc_embeddings, blended_query_embedding)
+        # doc_scores     = cosine_similarities(doc_embeddings, blended_query_embedding)
         best_doc_score = float(doc_scores.max())
 
         # Primary threshold — strong topical match

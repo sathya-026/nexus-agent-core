@@ -14,7 +14,6 @@ Internal layout is free to change; this surface stays stable.
 from app.agent.query_router.types import Route, RouteResult
 from app.agent.query_router.router import route
 from app.agent.query_router.cache import invalidate_route_cache, build_route_cache
-from app.agent.query_router.embedder import warmup_model
 
 __all__ = [
     # Types
