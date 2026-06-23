@@ -8,6 +8,8 @@ class Setting(BaseSettings):
 
     frontend_url: str = "http://localhost:5173"
 
+    cors_allowed_origins: list[str] = []
+
     # Database
     database_url: str
 

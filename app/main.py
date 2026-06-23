@@ -62,9 +62,13 @@ app = FastAPI(
 )
 
 # CORS — only NestJS and the widget need to reach this service
+
+allowed_origins = [settings.nestjs_url, settings.frontend_url]
+allowed_origins.extend([origin.strip() for origin in settings.cors_allowed_origins if origin.strip()])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.nestjs_url, settings.frontend_url],
+    allow_origins=allowed_origins,
     allow_methods=["POST", "GET"],
     allow_headers=["Authorization", "Content-Type"],
 )
