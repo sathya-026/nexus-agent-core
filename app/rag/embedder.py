@@ -18,12 +18,14 @@ reasoning on why this is split from the semantic router's embedder.
 from __future__ import annotations
 
 from app.ai.embeddings.factory import get_embedding_provider
+from app.rag.chunker import Chunk
 
 _provider = get_embedding_provider("openai")
 
 
-async def embed_chunks(texts: list[str]) -> list[list[float]]:
+async def embed_chunks(chunks: list[Chunk]) -> list[list[float]]:
     """Used at index time — takes List[str] chunk content, returns List[List[float]]."""
+    texts = [chunk.content for chunk in chunks]
     return await _provider.embed_chunks(texts)
 
 

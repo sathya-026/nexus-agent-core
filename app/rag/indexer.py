@@ -107,7 +107,7 @@ async def run_indexing_pipeline(
 
         # ── Stage 8: Invalidate semantic router cache ───────────────────
         # So the new document is considered in routing decisions immediately.
-        invalidate_route_cache(redis, agent_id)
+        await invalidate_route_cache(redis, agent_id)
 
         await log_event(db, org_id, agent_id, AnalyticEvent.DOCUMENT_INDEXED, {
             "document_id": document_id,
