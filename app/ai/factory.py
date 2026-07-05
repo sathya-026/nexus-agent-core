@@ -46,8 +46,16 @@ def get_provider(provider: str, model: str) -> AIProvider:
             from app.ai.providers.gemini import GeminiProvider
             return GeminiProvider(model=model)
 
+        case AIProviderType.FIREWORKS:
+            from app.ai.providers.fireworks import FireworksProvider
+            return FireworksProvider(model=model)
+
+        case AIProviderType.LOCAL:
+            from app.ai.providers.local import LocalProvider
+            return LocalProvider(model=model)
+
         case _:
             raise ValueError(
                 f"Unknown AI provider '{provider}'. "
-                f"Supported providers: openai, gemini"
+                f"Supported providers: openai, gemini, fireworks, local"
             )

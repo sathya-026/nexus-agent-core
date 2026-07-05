@@ -24,6 +24,9 @@ Contract
       Yields normalised AIEvents — ContentDelta | ToolCallComplete | UsageEvent.
 
       Responsibilities inside this method:
+        - Convert `tools` (list[ToolSchema]) to this provider's native
+          function-calling format before calling the SDK — ToolSchema is
+          provider-agnostic; this is the only place that conversion happens
         - All provider-specific streaming logic
         - Tool call delta accumulation (character-by-character → ToolCallComplete)
         - Usage extraction and emission as UsageEvent
@@ -37,8 +40,23 @@ from typing import Any, AsyncGenerator
 
 from app.ai.types import AIEvent, MemoryMessage, ToolCallComplete, ToolSchema
 
+class ProviderUnavailableError(Exception):
+    """
+    Raised by stream() for infra failures (connection refused, timeout) —
+    not real model/content errors. Lets callers reroute to another
+    provider instead of parsing exception messages to guess. Realistic
+    failure mode for a self-hosted LocalProvider; not currently raised by
+    OpenAIProvider/GeminiProvider.
+    """
 
 class AIProvider(ABC):
+
+    # Whether this provider+model can reliably make tool calls. True for
+    # every provider so far (OpenAI, Gemini). Override in __init__ for
+    # providers where it depends on the configured model rather than the
+    # vendor — e.g. a Fireworks-hosted open model or a self-hosted local
+    # model that wasn't fine-tuned for function calling.
+    supports_tool_calling: bool = True
 
     FORMATTING_INSTRUCTIONS = """
     ## Response Formatting

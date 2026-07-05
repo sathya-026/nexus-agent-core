@@ -9,8 +9,12 @@ class AnalyticEvent(str, Enum):
     TOOL_ITERATION_LIMIT = "tool iteration limit reached"
     DOCUMENT_INDEXED = "document indexed"
     DOCUMENT_INDEXING_FAILED = "document indexing failed"
+    MODEL_ROUTING = "model routing"
+    LOCAL_MODEL_FALLBACK = "local model fallback"
 
 class AIProviderType(str, Enum):
     OPENAI = "openai"
     GEMINI = "gemini"
     AZURE_OPENAI = "azure_openai"
+    FIREWORKS = "fireworks"
+    LOCAL = "local"

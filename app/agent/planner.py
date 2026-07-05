@@ -20,6 +20,10 @@ from dataclasses import dataclass
 
 from typing import Any, AsyncGenerator
 
+from docx import settings
+
+from app.agent.model_router import choose
+from app.ai.base import ProviderUnavailableError
 from app.ai.factory import get_provider
 from app.ai.types import ContentDelta, ToolCallComplete, ToolSchema, UsageEvent
 
@@ -40,7 +44,7 @@ from app.agent.memory import (
     load_memory,
     update_conversation_intent,
 )
-from app.agent import tool_executor as Executor
+from app.agent import tool_executor as ToolExecutor
 from app.agent.query_router.router import route as semantic_router, Route
 
 logger = logging.getLogger(__name__)
@@ -183,7 +187,34 @@ async def _execute(
     )
 
     # -- Build provider message list --
-    provider = get_provider(provider=agent.llm_provider, model=agent.llm_model)
+    fallback_factory = None
+    if agent.llm_provider == "auto":
+        choice = choose(
+            user_message=user_message,
+            rag_context=rag_context,
+            use_tools=use_tools,
+            local_model=settings.AUTO_LOCAL_MODEL,
+            remote_model=settings.AUTO_REMOTE_MODEL,
+        )
+        await log_event(
+            db,
+            org_id,
+            agent_id,
+            AnalyticEvent.MODEL_ROUTING,
+            {
+                "conversation_id": conversation_id,
+                "provider": choice.provider,
+                "model": choice.model,
+                "reason": choice.reason,
+            },
+        )
+        provider = get_provider(provider=choice.provider, model=choice.model)
+        if choice.provider == "local":
+            fallback_factory = lambda: get_provider(
+                provider="fireworks", model=settings.AUTO_REMOTE_MODEL
+            )
+    else:
+        provider = get_provider(provider=agent.llm_provider, model=agent.llm_model)
 
     # Route.META: append meta_context to the user turn before formatting
     effective_user_message = user_message
@@ -225,7 +256,39 @@ async def _execute(
         pending_tool_calls: list[ToolCallComplete] = []
         turn_content: list[str] = []
 
-        async for event in provider.stream(messages, tools):
+        # Fallback only applies pre-first-token: once an event has been
+        # pulled from the stream, a failure propagates normally — there's
+        # no clean way to retry invisibly once content may be mid-flight
+        # to the SSE client. fallback_factory is cleared after one use, so
+        # a turn falls back at most once and stays on that provider for
+        # any further iterations of the same turn.
+        stream = provider.stream(messages, tools)
+        try:
+            first_event = await stream.__anext__()
+        except StopAsyncIteration:
+            first_event = None
+        except ProviderUnavailableError:
+            if fallback_factory is None:
+                raise
+            await log_event(
+                db, org_id, agent_id, AnalyticEvent.LOCAL_MODEL_FALLBACK,
+                {"conversation_id": conversation_id},
+            )
+            provider = fallback_factory()
+            fallback_factory = None
+            stream = provider.stream(messages, tools)
+            try:
+                first_event = await stream.__anext__()
+            except StopAsyncIteration:
+                first_event = None
+
+        async def _events():
+            if first_event is not None:
+                yield first_event
+            async for event in stream:
+                yield event
+
+        async for event in _events():
             if isinstance(event, ToolCallComplete):
                 pending_tool_calls.append(event)
             elif isinstance(event, ContentDelta):
@@ -258,7 +321,7 @@ async def _execute(
                     latency = 0
                 else:
                     t0 = time.monotonic()
-                    tool_result = await Executor.execute(tool_row, tc.arguments)
+                    tool_result = await ToolExecutor.execute(tool_row, tc.arguments)
                     latency = int((time.monotonic() - t0) * 1000)
                     result = tool_result.output
                     status = tool_result.status
