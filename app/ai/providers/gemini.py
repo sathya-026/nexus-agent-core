@@ -158,7 +158,13 @@ class GeminiProvider(AIProvider):
         stream completes, using the last seen value.
         """
         gemini_tools = (
-            [gtypes.Tool(function_declarations=[self._tool_schema_to_gemini(t) for t in tools])]
+            [
+                gtypes.Tool(
+                    function_declarations=[
+                        self._tool_schema_to_gemini(t) for t in tools
+                    ]
+                )
+            ]
             if tools
             else None
         )
@@ -183,7 +189,9 @@ class GeminiProvider(AIProvider):
             if not chunk.candidates:
                 continue
 
-            parts = chunk.candidates[0].content.parts if chunk.candidates[0].content else []
+            parts = (
+                chunk.candidates[0].content.parts if chunk.candidates[0].content else []
+            )
             if not parts:
                 continue
 
@@ -246,39 +254,38 @@ class GeminiProvider(AIProvider):
                                  + Content(role="user", parts=[function_response, ...])
                                  reconstructed from ToolCallRecord.output
         """
-        if mem.role == "user":
-            return [gtypes.Content(role="user", parts=[gtypes.Part.from_text(text=mem.content)])]
+        if not mem.tool_calls:
+            return [
+                gtypes.Content(
+                    role="model" if mem.role == "assistant" else "user",
+                    parts=[gtypes.Part.from_text(text=mem.content)],
+                )
+            ]
 
-        if mem.role == "assistant":
-            if not mem.tool_calls:
-                return [gtypes.Content(role="model", parts=[gtypes.Part.from_text(text=mem.content)])]
+        model_turn = gtypes.Content(
+            role="model",
+            parts=[
+                gtypes.Part.from_function_call(
+                    name=tc.tool_name,
+                    args=json.loads(tc.arguments),  # stored as JSON string
+                )
+                for tc in mem.tool_calls
+            ],
+        )
 
-            model_turn = gtypes.Content(
-                role="model",
-                parts=[
-                    gtypes.Part.from_function_call(
-                        name=tc.tool_name,
-                        args=json.loads(tc.arguments),  # stored as JSON string
-                    )
-                    for tc in mem.tool_calls
-                ],
-            )
+        tool_result_turn = gtypes.Content(
+            role="user",
+            parts=[
+                gtypes.Part.from_function_response(
+                    name=tc.tool_name,
+                    response=json.loads(tc.output),  # stored as JSON string
+                    id=tc.tool_call_id,
+                )
+                for tc in mem.tool_calls
+            ],
+        )
 
-            tool_result_turn = gtypes.Content(
-                role="user",
-                parts=[
-                    gtypes.Part.from_function_response(
-                        name=tc.tool_name,
-                        response=json.loads(tc.output),  # stored as JSON string
-                        id=tc.tool_call_id,
-                    )
-                    for tc in mem.tool_calls
-                ],
-            )
-
-            return [model_turn, tool_result_turn]
-
-        return []
+        return [model_turn, tool_result_turn]
 
     def _tool_schema_to_gemini(self, tool: ToolSchema) -> gtypes.FunctionDeclaration:
         """Convert neutral ToolSchema to Gemini's FunctionDeclaration format."""

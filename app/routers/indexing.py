@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.database import get_db
+from app.database import _ASYNC_SESSIONMAKER, get_db
 from app.rag.indexer import run_indexing_pipeline
 
 from redis.asyncio import Redis
@@ -35,27 +35,29 @@ def _verify_internal(secret: str):
     if secret != settings.internal_secret:
         raise HTTPException(status_code=401, detail="Unauthorized internal call")
 
+
 @router.post("/index")
 async def index_document(
     req: IndexRequest,
     background_tasks: BackgroundTasks,
     x_internal_secret: str = Header(...),
     db: AsyncSession = Depends(get_db),
-    redis: Redis = Depends(get_redis)
+    redis: Redis = Depends(get_redis),
 ):
     _verify_internal(x_internal_secret)
 
-    # Returns 200 immediately — indexing runs in the background.
-    # NestJS polls document status to know when it's done.
-    background_tasks.add_task(
-        run_indexing_pipeline,
-        db=db,
-        redis=redis,
-        document_id=req.document_id,
-        agent_id=req.agent_id,
-        org_id=req.org_id,
-        s3_key=req.s3_key,
-        file_type=req.file_type,
-    )   
+    async with _ASYNC_SESSIONMAKER() as session:
+        # Returns 200 immediately — indexing runs in the background.
+        # NestJS polls document status to know when it's done.
+        background_tasks.add_task(
+            run_indexing_pipeline,
+            db=session,
+            redis=redis,
+            document_id=req.document_id,
+            agent_id=req.agent_id,
+            org_id=req.org_id,
+            s3_key=req.s3_key,
+            file_type=req.file_type,
+        )
 
     return {"status": "queued", "document_id": req.document_id}

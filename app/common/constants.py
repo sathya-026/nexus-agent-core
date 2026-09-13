@@ -1,16 +1,17 @@
 from enum import Enum
 
 class AnalyticEvent(str, Enum):
-    SEMANTIC_ROUTING = "semantic routing"
-    RAG_HIT = "rag hit"
-    RAG_MISS = "rag miss"
-    TOOL_CALL = "tool call"
-    TOOL_FAILURE = "tool failure"
-    TOOL_ITERATION_LIMIT = "tool iteration limit reached"
-    DOCUMENT_INDEXED = "document indexed"
-    DOCUMENT_INDEXING_FAILED = "document indexing failed"
+    SEMANTIC_ROUTING = "SEMANTIC ROUTING"
+    RAG_HIT = "RAG HIT"
+    RAG_MISS = "RAG MISS"
+    TOOL_CALL = "TOOL CALL"
+    TOOL_FAILURE = "TOOL FAILURE"
+    TOOL_ITERATION_LIMIT = "TOOL ITERATION LIMIT REACHED"
+    DOCUMENT_INDEXED = "DOCUMENT INDEXED"
+    DOCUMENT_INDEXING_FAILED = "DOCUMENT INDEXING FAILED"
+    MESSAGE_TURN = "MESSAGE TURN"
 
 class AIProviderType(str, Enum):
     OPENAI = "openai"
     GEMINI = "gemini"
-    AZURE_OPENAI = "azure_openai"
+    AZURE_OPENAI = "azure"

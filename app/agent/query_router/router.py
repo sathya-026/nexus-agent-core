@@ -139,7 +139,7 @@ async def route(
     query_embedding = (
         raw_embedding
         if query_text == raw_query
-        else (await embed_query_async(raw_query))
+        else (await embed_query_async(query_text))
     )
     
     # ── Load conversation intent and blend with current query ────────────────────

@@ -45,6 +45,39 @@ async def save_message(
         logger.exception(f"Error during inserting message {str(e)}")
         await db.rollback()
 
+async def update_message(
+    db: AsyncSession,
+    message_id: int,
+    tokens_used: int = None,
+    latency_ms: int = None,
+) -> int:
+    """
+    Persist one message. sequence_number is assigned by the Postgres
+    BEFORE INSERT trigger — never set by application code.
+
+    Returns the trigger-assigned sequence_number.
+    """
+    try:
+        result = await db.execute(
+            text("""
+                UPDATE messages
+                SET tokens_used = :tokens_used, latency_ms = :latency_ms
+                WHERE id = :message_id
+                RETURNING *
+            """),
+            {
+                "message_id": message_id,
+                "tokens_used": tokens_used,
+                "latency_ms": latency_ms,
+            },
+        )
+        row = result.fetchone()
+        await db.commit()
+        return row.id
+    except Exception as e:
+        logger.exception(f"Error during updating message {str(e)}")
+        await db.rollback()
+
 
 async def fetch_messages(
     db: AsyncSession, conversation_id: str, max_messages: int = 10

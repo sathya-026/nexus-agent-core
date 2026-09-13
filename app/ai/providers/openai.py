@@ -234,41 +234,36 @@ class OpenAIProvider(AIProvider):
         )
 
     def _memory_message_to_openai(self, mem: MemoryMessage) -> list[dict[str, Any]]:
-        if mem.role == "user":
-            return [{"role": "user", "content": mem.content}]
+        if not mem.tool_calls:
+            return [{"role": mem.role, "content": mem.content}]
 
-        if mem.role == "assistant":
-            if not mem.tool_calls:
-                return [{"role": "assistant", "content": mem.content}]
-
-            assistant_msg: dict[str, Any] = {
-                "role": "assistant",
-                "content": mem.content or None,  # Responses API: None if empty
-                "tool_calls": [
-                    {
-                        "id": tc.tool_call_id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.tool_name,
-                            "arguments": tc.arguments,  # already a JSON string
-                        },
-                    }
-                    for tc in mem.tool_calls
-                ],
-            }
-
-            tool_result_msgs: list[dict[str, Any]] = [
+        msg: dict[str, Any] = {
+            "role": mem.role,
+            "content": mem.content or None,
+            "tool_calls": [
                 {
-                    "role": "tool",
-                    "tool_call_id": tc.tool_call_id,
-                    "content": tc.output,  # already a JSON string
+                    "id": tc.tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.tool_name,
+                        "arguments": tc.arguments,
+                    },
                 }
                 for tc in mem.tool_calls
-            ]
+            ],
+        }
 
-            return [assistant_msg, *tool_result_msgs]
+        tool_result_msgs: list[dict[str, Any]] = [
+            {
+                "role": "tool",
+                "tool_call_id": tc.tool_call_id,
+                "content": tc.output,
+            }
+            for tc in mem.tool_calls
+        ]
 
-        return []
+        return [msg, *tool_result_msgs]
+
 
     def _tool_schema_to_openai(self, tool: ToolSchema) -> dict[str, Any]:
         """Convert neutral ToolSchema to OpenAI function-calling format."""

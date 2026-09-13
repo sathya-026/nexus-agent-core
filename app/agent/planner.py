@@ -27,7 +27,7 @@ from app.common.constants import AnalyticEvent
 from app.db.agents import load_agent
 from app.db.analytics import log_event
 from app.db.conversations import update_conversation_stats
-from app.db.messages import save_message
+from app.db.messages import save_message, update_message
 from app.db.tool_call import save_tool_call
 from app.db.tools import load_tools
 
@@ -68,12 +68,11 @@ class PlannerResult:
 
 async def run(
     db: AsyncSession,
+    redis: Redis,
     agent_id: str,
     org_id: str,
     conversation_id: str,
     user_message: str,
-    rag_context: str,
-    rag_hit: bool,
 ) -> PlannerResult:
     """
     Batch entry point — collects all tokens and returns a PlannerResult.
@@ -83,15 +82,12 @@ async def run(
     tokens: list[str] = []
 
     async for token in _execute(
-        db, agent_id, org_id, conversation_id, user_message, rag_context, rag_hit
+        db, redis, agent_id, org_id, conversation_id, user_message
     ):
         tokens.append(token)
 
     return PlannerResult(
         response="".join(tokens),
-        tokens_used=0,  # tokens tracked internally; expose via analytics if needed
-        iterations=0,  # same — could thread through _execute if required
-        rag_hit=rag_hit,
         latency_ms=int((time.monotonic() - start) * 1000),
     )
 
@@ -128,13 +124,13 @@ async def _execute(
         org_id,
         agent_id,
         AnalyticEvent.SEMANTIC_ROUTING,
-        {
-            "conversation_id": conversation_id,
+        {        
             "route": route.value,
             "meta_context": meta_context,
             "matched_tools": route_result.matched_tools,
             "contextualized_query": retrieval_query != user_message,
         },
+        conversation_id=conversation_id
     )
 
     use_tools = route in (Route.TOOL, Route.BOTH)
@@ -172,9 +168,9 @@ async def _execute(
             agent_id,
             AnalyticEvent.RAG_MISS,
             {
-                "conversation_id": conversation_id,
                 "query": retrieval_query,
             },
+            conversation_id=conversation_id
         )
 
     # -- Persist user message --
@@ -218,6 +214,8 @@ async def _execute(
     provider.append_user_message(messages, effective_user_message)
 
     # -- ReAct loop --
+    prompt_tokens = 0
+    completion_tokens = 0
     total_tokens = 0
 
     for _ in range(MAX_ITERATIONS):
@@ -232,6 +230,8 @@ async def _execute(
                 turn_content.append(event.content)
                 yield event.content
             elif isinstance(event, UsageEvent):
+                prompt_tokens += event.prompt_tokens                
+                completion_tokens += event.completion_tokens
                 total_tokens += event.total_tokens
 
         assistant_msg_id = user_message_id
@@ -241,8 +241,15 @@ async def _execute(
                 conversation_id,
                 role="assistant",
                 content="".join(turn_content),
-                tokens_used=total_tokens,
+                tokens_used=completion_tokens,
                 latency_ms=int((time.monotonic() - start_ms) * 1000),
+            )
+
+        if prompt_tokens > 0:
+            await update_message(
+                db,
+                message_id=assistant_msg_id,
+                tokens_used=completion_tokens,
             )
 
         # -- Tool-calling iteration --
@@ -267,7 +274,7 @@ async def _execute(
                 await save_tool_call(
                     db,
                     message_id=assistant_msg_id,
-                    tool_id=tool_row.id if tool_row else 0,
+                    tool_id=tool_row.id if tool_row else None,
                     input_data=tc.arguments,
                     output=result,
                     status=status,
@@ -280,10 +287,10 @@ async def _execute(
                         agent_id,
                         AnalyticEvent.TOOL_FAILURE,
                         {
-                            "conversation_id": conversation_id,
                             "tool_name": tc.tool_name,
                             "status": status,
                         },
+                        conversation_id=conversation_id,
                     )
 
             provider.append_tool_results(messages, pending_tool_calls, results)
@@ -298,9 +305,9 @@ async def _execute(
             agent_id,
             AnalyticEvent.TOOL_ITERATION_LIMIT,
             {
-                "conversation_id": conversation_id,
                 "iterations": MAX_ITERATIONS,
             },
+            conversation_id=conversation_id,
         )
         fallback = (
             "I wasn't able to complete this in the allowed number of steps. "
@@ -318,7 +325,22 @@ async def _execute(
         asyncio.create_task(
             update_conversation_intent(redis, conversation_id, updated_memory.messages)
         )
-    
+
+    await log_event(
+        db,
+        org_id,
+        agent_id,
+        AnalyticEvent.MESSAGE_TURN,
+        {
+            "user_msg_id": user_message_id,
+            "assistant_msg_id": assistant_msg_id,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        },
+        conversation_id=conversation_id,
+    )
+
     await update_conversation_stats(db, conversation_id, tokens_delta=total_tokens)
 
 

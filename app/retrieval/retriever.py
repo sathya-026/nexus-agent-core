@@ -100,10 +100,10 @@ async def retrieve(
                         content,
                         document_id,
                         chunk_index,
-                        1 - (embedding <=> '{embedding_str}'::vector) AS similarity
+                        1 - (embedding <=> :embedding::vector) AS similarity
                     FROM  document_chunks
                     WHERE agent_id = :agent_id
-                    ORDER BY embedding <=> '{embedding_str}'::vector ASC
+                    ORDER BY embedding <=> :embedding::vector ASC
                     LIMIT :top_k
                 ) candidates
                 WHERE similarity >= :threshold
@@ -112,6 +112,7 @@ async def retrieve(
                 "agent_id":  agent_id,
                 "top_k":     top_k,
                 "threshold": threshold,
+                "embedding": embedding_str,
             },
         )
         rows = result.fetchall()
